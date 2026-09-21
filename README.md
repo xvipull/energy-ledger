@@ -1,64 +1,100 @@
-# Energy Ledger
+# Energy Consumption, Cost & Sustainability Reconciliation Platform
 
-Energy Ledger reconciles utility consumption, cost, and sustainability metrics into a governed monthly view for facilities, finance, and sustainability leaders. It turns disparate invoices, meter readings, and emissions factors into an auditable operating record.
+Energy Ledger converts messy utility invoices, monthly meter consumption, site master data, and emissions factors into an auditable operating record. Finance can close energy cost, Facilities can investigate consumption, and Sustainability can trace activity to an approved factor.
 
-## What it enables
+## Problem, stakeholders, and dataset
 
-- Reconcile billed energy costs to consumption and meter data by site, account, and period.
-- Identify material cost, consumption, and emissions variances before close.
-- Supply finance-ready accrual evidence and sustainability-ready Scope 2 activity data.
-- Track exceptions to an accountable owner through resolution.
+Utility data is split across invoices, meter portals, and reference workbooks with inconsistent keys, dates, fuel labels, units, and periods. This platform provides governed cleaning, a dimensional model, reconciliations, anomaly detection, SQL analytics, and decision products.
 
-## Architecture
+| Stakeholder | Decision supported |
+| --- | --- |
+| Finance | Is billed cost complete, reconciled, and suitable for close? |
+| Facilities | Which site/account/meter interval needs investigation? |
+| Sustainability | Is energy activity complete and traceable to an effective factor? |
 
-```text
-Utility invoices / meter exports / site master / tariff & emission factors
-                                |
-                                v
-                         data/raw (immutable landing)
-                                |
-                                v
-                    data/staging (standardized records)
-                                |
-                                v
-                 SQL reconciliation & KPI calculation layer
-                                |
-                   +------------+------------+
-                   v                         v
-              Power BI models           Excel close packs
-                   |                         |
-                   +----------- reports -----+
+The tracked data is a deliberately small **synthetic** India sample: six August 2026 invoice lines, three sites, two controlled factors, and 45 January–September meter intervals. It is safe to publish, includes real-world-format inconsistencies, and contains one deliberate meter anomaly. It is not operational or disclosure data.
+
+## Architecture and schema
+
+```mermaid
+flowchart LR
+  A[Invoices] --> D[Raw CSV]
+  B[Meter consumption] --> D
+  C[Site and factor masters] --> D
+  D --> E[Python validation and cleaning]
+  E --> F[SQLite star model]
+  F --> G[SQL KPI and reconciliation views]
+  F --> H[Persisted meter anomaly results]
+  G --> I[Power BI model package]
+  G --> J[Excel management pack]
+  G --> K[EDA and quality reports]
 ```
 
-## Repository layout
+Invoice grain is one utility invoice line. Meter grain is one meter, closed billing interval, and source reading. Integer surrogate keys join conformed site, date, energy-type, currency, factor, and meter dimensions while source business keys remain visible.
 
-| Path | Purpose |
+## KPIs, controls, and techniques
+
+| KPI / control | Implementation |
 | --- | --- |
-| `docs/` | Business requirements, KPI definitions, assumptions, and data dictionary |
-| `data/raw/` | Immutable source-file landing area; never manually transform in place |
-| `data/staging/` | Standardized, quality-checked intermediate datasets |
-| `sql/` | Reconciliation, transformations, and validation queries |
-| `src/` | Reusable ingestion and transformation code |
-| `notebooks/` | Exploratory and documented analysis |
-| `tests/` | Automated data-quality and transformation tests |
-| `powerbi/` | Semantic model and report assets |
-| `excel/` | Finance close packs and controlled templates |
-| `reports/` | Published extracts and management reports |
+| Consumption, cost, emissions, intensity, cost/kWh | `v_monthly_site_energy_kpis`, `v_monthly_portfolio_trends` |
+| Bill-versus-meter variance | Exact site/account/fuel/period matching; high above 5% |
+| Meter anomaly | Trailing median/MAD robust-z score; high/low above absolute 3.5 after six prior periods |
+| Reconciliation | Source → curated → reporting, 0-row and ₹0.01 value tolerance |
+| Data quality | Required fields, duplicates, ranges, relationships, freshness, reconciliation |
+
+The implementation uses Python `csv`/`Decimal`, SQLite foreign keys, SQL CTEs and `LAG`, Pandas/NumPy/Seaborn EDA, and Power BI-ready DAX/SQLite extracts. The Excel pack includes formula-driven scenario controls and editable charts.
 
 ## Screenshots
 
-### Executive reconciliation dashboard
+### Executive management summary
 
-`[Placeholder: monthly cost, kWh, and tCO2e variance dashboard]`
+![Executive management summary](reports/figures/executive_summary.png)
 
-### Exception workbench
+### Consumption and invoice-cost drivers
 
-`[Placeholder: unresolved utility invoice and meter matching exceptions]`
+![Consumption and invoice-cost drivers](reports/figures/site_energy_cost_drivers.png)
 
-## Getting started
+### Distribution and completeness
 
-Read [the requirements](docs/requirements.md), validate fields against [the data dictionary](docs/data_dictionary.md), then place approved source extracts in `data/raw/` using the agreed naming convention.
+![Distribution and completeness](reports/figures/invoice_distribution_and_missingness.png)
 
-## Status
+## Reproduce from a fresh clone
 
-Business analytics foundation. The first implementation increment will prioritize monthly utility invoice-to-meter reconciliation for owned facilities.
+```sh
+git clone https://github.com/xvipull/energy-ledger.git
+cd energy-ledger
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 src/run_pipeline.py
+python3 -m unittest discover -s tests -v
+python3 src/run_eda.py
+```
+
+This generates the ignored SQLite database, clean staging CSVs, quality report, and EDA report. Verify reconciliation:
+
+```sh
+sqlite3 data/energy_ledger.db "SELECT * FROM v_reconciliation_source_to_reporting;"
+```
+
+Open [the Excel management pack](excel/energy_ledger_management_pack.xlsx) for management review. Use [the Power BI package](powerbi/README.md) to create the desktop report from governed SQLite extracts.
+
+## Insights, recommendations, and limitations
+
+- Source, curated, and reporting invoice totals reconcile: 6 rows and ₹594,750.00 at every layer.
+- All five August bill-to-meter matches are within 5%; the largest is Bengaluru HQ electricity at 2.46%.
+- The deliberate September Bengaluru HQ electricity reading is a high anomaly (robust z 96.32) and requires meter/read/operating-context validation, not automatic action.
+- The sample has one invoice month, synthetic values, no tariff/FX layer, no effective-dated meter mapping, and no weather/occupancy normalization. Expand history before operational trend conclusions.
+
+Next steps: production source onboarding and volume testing, Finance approval of tax/credit/FX policy, effective-dated meter mappings, weather/occupancy enrichment, Power BI row-level security, and governed exception assignment.
+
+## Portfolio impact statements
+
+- Built a reproducible utility-data pipeline that standardizes mixed formats and blocks invalid loads.
+- Implemented star-schema analytics, raw-to-reporting reconciliation, and robust meter anomaly detection with auditable thresholds.
+- Delivered Power BI-ready semantic assets and an Excel management pack for Finance, Facilities, and Sustainability.
+
+## Documentation
+
+- [Data pipeline](docs/data_pipeline.md), [SQL analytics](docs/sql_analytics.md), [advanced analytics](docs/advanced_analytics.md)
+- [UAT evidence](docs/uat.md), [demo script](docs/demo_script.md), [KPI catalog](docs/kpi_catalog.md), and [requirements](docs/requirements.md)
