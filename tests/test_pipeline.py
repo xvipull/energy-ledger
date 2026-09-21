@@ -25,13 +25,15 @@ class EnergyLedgerPipelineTests(unittest.TestCase):
             connection.close()
 
     def test_cleaning_standardizes_keys_units_and_categories(self):
-        _, _, facts, _ = clean(ROOT, as_of_date=date(2026, 9, 16))
+        _, _, facts, meter_rows, _ = clean(ROOT, as_of_date=date(2026, 9, 16))
         gas = next(row for row in facts if row["invoice_line_id"] == "INV-1004-01")
         electricity = next(row for row in facts if row["invoice_line_id"] == "INV-1001-01")
         self.assertEqual(gas["site_id"], "IN-BLR-001")
         self.assertEqual(gas["energy_type"], "natural_gas")
         self.assertAlmostEqual(gas["quantity_kwh_equivalent"], 119444.44454, places=5)
         self.assertEqual(electricity["currency_code"], "INR")
+        self.assertEqual(len(meter_rows), 45)
+        self.assertEqual(meter_rows[0]["energy_type"], "electricity")
 
     def test_freshness_control_fails_for_stale_data(self):
         with self.assertRaisesRegex(DataQualityError, "freshness failure"):
@@ -56,6 +58,28 @@ class EnergyLedgerPipelineTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM v_invoice_rate_exceptions").fetchone()[0], 6
             )
+        finally:
+            connection.close()
+
+    def test_robust_meter_anomaly_and_bill_meter_variance_are_governed(self):
+        result = run(ROOT, as_of_date=date(2026, 9, 16))
+        connection = sqlite3.connect(result["database"])
+        try:
+            anomaly = connection.execute(
+                """SELECT observed_kwh, history_period_count, baseline_median_kwh,
+                          baseline_mad_kwh, robust_z_score, anomaly_status
+                   FROM v_meter_anomaly
+                   WHERE meter_id = 'MTR-BLR-E1' AND billing_end_date = '2026-09-30'"""
+            ).fetchone()
+            self.assertEqual(anomaly[:4], (30000.0, 8, 12150.0, 125.0))
+            self.assertGreater(anomaly[4], 3.5)
+            self.assertEqual(anomaly[5], "anomaly_high")
+            reconciliation = connection.execute(
+                """SELECT COUNT(*), MAX(ABS(bill_vs_meter_variance_pct))
+                   FROM v_bill_meter_variance WHERE reconciliation_status = 'within_5pct_tolerance'"""
+            ).fetchone()
+            self.assertEqual(reconciliation[0], 5)
+            self.assertLessEqual(reconciliation[1], 5.0)
         finally:
             connection.close()
 

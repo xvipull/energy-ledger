@@ -2,7 +2,7 @@
 
 ## Selected dataset
 
-The pipeline uses a deliberately small, synthetic August 2026 India utility-invoice dataset representing three facilities, plus site master and emissions-factor reference data. It is safe to commit and exercises the practical source problems expected from utility providers: inconsistent date formats, whitespace/case differences in keys, category aliases, mixed currency formatting, and mixed energy units. Production source files belong in `data/raw/` under the same schemas; raw files are never edited by the pipeline.
+The pipeline uses a deliberately small, synthetic August 2026 India utility-invoice dataset representing three facilities, plus site master, emissions-factor reference data, and nine months of monthly meter-consumption intervals. It is safe to commit and exercises the practical source problems expected from utility providers: inconsistent date formats, whitespace/case differences in keys, category aliases, mixed currency formatting, and mixed energy units. Production source files belong in `data/raw/` under the same schemas; raw files are never edited by the pipeline.
 
 ## Run
 
@@ -27,7 +27,7 @@ The run creates `data/energy_ledger.db`, clean staging CSVs, and `reports/data_q
 
 ## Quality controls
 
-The pipeline fails before database load on missing required columns, required-value nulls, duplicate business keys, invalid date/quantity/amount ranges, unmapped sites/categories/units/currencies, factor referential-integrity failures, or stale invoice data. It also compares raw invoice row count and summed parsed invoice value to the loaded fact table; a mismatch fails the run. The Markdown report records every check and reconciliation result.
+The pipeline fails before database load on missing required columns, required-value nulls, duplicate business keys, invalid date/quantity/amount ranges, unmapped sites/categories/units/currencies, factor referential-integrity failures, or stale invoice data. The same controls apply to the committed monthly meter-consumption feed (`meter_reading_id` and meter/end-date keys are unique). It also compares raw invoice row count and summed parsed invoice value to the loaded fact table; a mismatch fails the run. The Markdown report records every check and reconciliation result.
 
 ## Model and grain
 

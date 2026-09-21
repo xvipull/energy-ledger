@@ -21,6 +21,8 @@ Run the query after `python3 src/run_pipeline.py`:
 SELECT * FROM v_reconciliation_source_to_reporting;
 ```
 
+Meter anomaly and bill-versus-meter decision-support outputs are documented in [advanced analytics](advanced_analytics.md).
+
 ## EDA
 
 Run `python3 src/run_eda.py` after the pipeline. The script investigates curated-field missingness, descriptive distributions, IQR outlier signals, correlations, and site-level cost/consumption drivers. It writes a concise result narrative to `reports/eda_summary.md` and only two decision-useful PNGs to `reports/figures/`.

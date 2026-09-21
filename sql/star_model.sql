@@ -59,6 +59,43 @@ CREATE TABLE fact_energy_ledger (
   load_timestamp_utc TEXT NOT NULL
 );
 
+-- Meter grain: one meter's consumption for one closed billing interval.
+CREATE TABLE dim_meter (
+  meter_key INTEGER PRIMARY KEY,
+  meter_id TEXT NOT NULL UNIQUE,
+  site_key INTEGER NOT NULL REFERENCES dim_site(site_key),
+  utility_account_id TEXT NOT NULL,
+  energy_type_key INTEGER NOT NULL REFERENCES dim_energy_type(energy_type_key),
+  UNIQUE (site_key, utility_account_id, energy_type_key)
+);
+
+CREATE TABLE fact_meter_consumption (
+  meter_consumption_key INTEGER PRIMARY KEY,
+  meter_reading_id TEXT NOT NULL UNIQUE,
+  meter_key INTEGER NOT NULL REFERENCES dim_meter(meter_key),
+  billing_start_date_key INTEGER NOT NULL REFERENCES dim_date(date_key),
+  billing_end_date_key INTEGER NOT NULL REFERENCES dim_date(date_key),
+  quantity_native REAL NOT NULL,
+  native_unit TEXT NOT NULL,
+  quantity_kwh_equivalent REAL NOT NULL CHECK (quantity_kwh_equivalent > 0),
+  source_file_name TEXT NOT NULL,
+  load_timestamp_utc TEXT NOT NULL,
+  UNIQUE (meter_key, billing_end_date_key)
+);
+
+-- Governed, reproducible decision-support output. The fact key makes each
+-- anomaly result traceable to the exact meter interval it assessed.
+CREATE TABLE analytics_meter_anomaly (
+  meter_consumption_key INTEGER PRIMARY KEY REFERENCES fact_meter_consumption(meter_consumption_key),
+  history_period_count INTEGER NOT NULL,
+  baseline_median_kwh REAL,
+  baseline_mad_kwh REAL,
+  robust_z_score REAL,
+  anomaly_status TEXT NOT NULL,
+  methodology TEXT NOT NULL,
+  calculated_at_utc TEXT NOT NULL
+);
+
 -- One immutable control record per landed invoice extract.  This retains the
 -- source-level count and value needed to reconcile raw, curated, and reporting
 -- layers without copying raw invoice lines into the analytics model.

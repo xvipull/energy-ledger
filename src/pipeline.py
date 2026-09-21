@@ -3,6 +3,7 @@
 import csv
 import re
 import sqlite3
+import statistics
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,10 @@ REQUIRED_COLUMNS = {
     "emission_factors.csv": {
         "factor_id", "country_code", "energy_type", "effective_from", "effective_to",
         "kgco2e_per_kwh", "methodology",
+    },
+    "meter_consumption.csv": {
+        "meter_reading_id", "meter_id", "site_code", "utility_account", "billing_start",
+        "billing_end", "energy_category", "quantity", "unit",
     },
 }
 CATEGORY_MAP = {"electricity": "electricity", "power": "electricity", "electric": "electricity",
@@ -91,7 +96,9 @@ def clean(base_dir, as_of_date=None):
     invoices = _read_csv(raw_dir / "utility_invoices.csv")
     sites = _read_csv(raw_dir / "sites.csv")
     factors = _read_csv(raw_dir / "emission_factors.csv")
-    for name, rows in (("utility_invoices.csv", invoices), ("sites.csv", sites), ("emission_factors.csv", factors)):
+    meter_readings = _read_csv(raw_dir / "meter_consumption.csv")
+    for name, rows in (("utility_invoices.csv", invoices), ("sites.csv", sites),
+                       ("emission_factors.csv", factors), ("meter_consumption.csv", meter_readings)):
         _check_required_values(rows, name)
 
     site_rows = []
@@ -155,19 +162,79 @@ def clean(base_dir, as_of_date=None):
             "source_file_name": "utility_invoices.csv",
         })
 
+    meter_rows = []
+    seen_meter_readings = set()
+    seen_meter_periods = set()
+    for raw in meter_readings:
+        reading_id = raw["meter_reading_id"].strip()
+        meter_id = raw["meter_id"].strip().upper()
+        if reading_id in seen_meter_readings:
+            raise DataQualityError(f"meter_consumption.csv: duplicate meter_reading_id {reading_id}")
+        seen_meter_readings.add(reading_id)
+        site_id = _site_id(raw["site_code"])
+        energy_type = CATEGORY_MAP.get(raw["energy_category"].strip().lower())
+        unit = raw["unit"].strip().lower()
+        if site_id not in site_map or not energy_type or unit not in UNIT_TO_KWH:
+            raise DataQualityError(f"meter_consumption.csv: invalid site, category, or unit on {reading_id}")
+        start, end = _parse_date(raw["billing_start"]), _parse_date(raw["billing_end"])
+        quantity = _decimal(raw["quantity"], "meter quantity")
+        period_key = (meter_id, end.isoformat())
+        if period_key in seen_meter_periods:
+            raise DataQualityError(f"meter_consumption.csv: duplicate meter period {meter_id}/{end}")
+        seen_meter_periods.add(period_key)
+        if quantity <= 0 or end < start:
+            raise DataQualityError(f"meter_consumption.csv: invalid range on {reading_id}")
+        meter_rows.append({
+            "meter_reading_id": reading_id, "meter_id": meter_id, "site_id": site_id,
+            "utility_account_id": raw["utility_account"].strip().upper(), "billing_start": start.isoformat(),
+            "billing_end": end.isoformat(), "energy_type": energy_type, "quantity_native": float(quantity),
+            "native_unit": unit.upper(), "quantity_kwh_equivalent": float((quantity * UNIT_TO_KWH[unit]).quantize(Decimal("0.000001"))),
+            "source_file_name": "meter_consumption.csv",
+        })
+
     cutoff = (as_of_date or date.today()).toordinal() - 45
     newest = max(_parse_date(row["invoice_date"]) for row in invoices)
     if newest.toordinal() < cutoff:
         raise DataQualityError(f"utility_invoices.csv: freshness failure; newest invoice date {newest} is older than 45 days")
-    return site_rows, factor_rows, cleaned, sum(_decimal(row["invoice_amount"], "invoice amount") for row in invoices)
+    return site_rows, factor_rows, cleaned, meter_rows, sum(_decimal(row["invoice_amount"], "invoice amount") for row in invoices)
 
 
-def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
+def _calculate_meter_anomalies(meter_rows):
+    """Return trailing robust-z anomaly results; six prior periods are required."""
+    results = []
+    by_meter = {}
+    for row in meter_rows:
+        by_meter.setdefault(row["meter_id"], []).append(row)
+    for rows in by_meter.values():
+        history = []
+        for row in sorted(rows, key=lambda value: value["billing_end"]):
+            if len(history) < 6:
+                row.update({"history_period_count": len(history), "baseline_median_kwh": None,
+                            "baseline_mad_kwh": None, "robust_z_score": None,
+                            "anomaly_status": "insufficient_history"})
+            else:
+                median = statistics.median(history)
+                mad = statistics.median([abs(value - median) for value in history])
+                if mad == 0:
+                    robust_z = None
+                    status = "zero_variability_baseline"
+                else:
+                    robust_z = 0.6745 * (row["quantity_kwh_equivalent"] - median) / mad
+                    status = "anomaly_high" if robust_z > 3.5 else "anomaly_low" if robust_z < -3.5 else "within_expected_range"
+                row.update({"history_period_count": len(history), "baseline_median_kwh": median,
+                            "baseline_mad_kwh": mad, "robust_z_score": robust_z, "anomaly_status": status})
+            history.append(row["quantity_kwh_equivalent"])
+            results.append(row)
+    return results
+
+
+def load_star_model(base_dir, site_rows, factor_rows, facts, meter_rows, raw_value):
     base_dir = Path(base_dir)
     db_path = base_dir / "data" / "energy_ledger.db"
     schema = (base_dir / "sql" / "star_model.sql").read_text(encoding="utf-8")
     kpi_layer = (base_dir / "sql" / "kpi_layer.sql").read_text(encoding="utf-8")
     reconciliation_layer = (base_dir / "sql" / "reconciliation.sql").read_text(encoding="utf-8")
+    advanced_analytics = (base_dir / "sql" / "advanced_analytics.sql").read_text(encoding="utf-8")
     if db_path.exists():
         db_path.unlink()
     connection = sqlite3.connect(db_path)
@@ -175,17 +242,19 @@ def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
     connection.executescript(schema)
     connection.executescript(kpi_layer)
     connection.executescript(reconciliation_layer)
+    connection.executescript(advanced_analytics)
     try:
         with connection:
             for row in site_rows:
                 connection.execute("INSERT INTO dim_site (site_id, site_name, country_code, floor_area_sqm, active_flag) VALUES (:site_id,:site_name,:country_code,:floor_area_sqm,:active_flag)", row)
-            for energy_type in sorted({row["energy_type"] for row in facts}):
+            for energy_type in sorted({row["energy_type"] for row in facts + meter_rows}):
                 connection.execute("INSERT INTO dim_energy_type (energy_type) VALUES (?)", (energy_type,))
             for currency in sorted({row["currency_code"] for row in facts}):
                 connection.execute("INSERT INTO dim_currency (currency_code) VALUES (?)", (currency,))
             for row in factor_rows:
                 connection.execute("INSERT INTO dim_emission_factor (factor_id,country_code,energy_type,effective_from,effective_to,kgco2e_per_kwh,methodology) VALUES (:factor_id,:country_code,:energy_type,:effective_from,:effective_to,:kgco2e_per_kwh,:methodology)", row)
-            all_dates = sorted({value for row in facts for value in (row["billing_start"], row["billing_end"], row["invoice_date"])})
+            all_dates = sorted({value for row in facts for value in (row["billing_start"], row["billing_end"], row["invoice_date"])} |
+                               {value for row in meter_rows for value in (row["billing_start"], row["billing_end"])})
             for value in all_dates:
                 parsed = date.fromisoformat(value)
                 connection.execute("INSERT INTO dim_date (date_key,calendar_date,calendar_year,calendar_month,month_name) VALUES (?,?,?,?,?)", (int(parsed.strftime("%Y%m%d")), value, parsed.year, parsed.month, parsed.strftime("%B")))
@@ -211,6 +280,27 @@ def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
                 connection.execute("""INSERT INTO fact_energy_ledger
                     (invoice_line_id,utility_account_id,site_key,billing_start_date_key,billing_end_date_key,invoice_date_key,energy_type_key,currency_key,emission_factor_key,quantity_native,native_unit,quantity_kwh_equivalent,invoice_amount_local,emissions_kgco2e,source_file_name,load_timestamp_utc)
                     VALUES (:invoice_line_id,:utility_account_id,:site_key,:billing_start_date_key,:billing_end_date_key,:invoice_date_key,:energy_type_key,:currency_key,:emission_factor_key,:quantity_native,:native_unit,:quantity_kwh_equivalent,:invoice_amount_local,:emissions_kgco2e,:source_file_name,:load_timestamp_utc)""", row)
+            for meter_id in sorted({row["meter_id"] for row in meter_rows}):
+                exemplar = next(row for row in meter_rows if row["meter_id"] == meter_id)
+                connection.execute("""INSERT INTO dim_meter (meter_id,site_key,utility_account_id,energy_type_key)
+                                      VALUES (?,?,?,?)""", (meter_id, ids["dim_site"][exemplar["site_id"]],
+                                                            exemplar["utility_account_id"], ids["dim_energy_type"][exemplar["energy_type"]]))
+            meter_keys = dict(connection.execute("SELECT meter_id, meter_key FROM dim_meter"))
+            for row in meter_rows:
+                row["meter_key"] = meter_keys[row["meter_id"]]
+                row["billing_start_date_key"] = int(row["billing_start"].replace("-", ""))
+                row["billing_end_date_key"] = int(row["billing_end"].replace("-", ""))
+                row["load_timestamp_utc"] = timestamp
+                cursor = connection.execute("""INSERT INTO fact_meter_consumption
+                    (meter_reading_id,meter_key,billing_start_date_key,billing_end_date_key,quantity_native,native_unit,quantity_kwh_equivalent,source_file_name,load_timestamp_utc)
+                    VALUES (:meter_reading_id,:meter_key,:billing_start_date_key,:billing_end_date_key,:quantity_native,:native_unit,:quantity_kwh_equivalent,:source_file_name,:load_timestamp_utc)""", row)
+                row["meter_consumption_key"] = cursor.lastrowid
+            for row in _calculate_meter_anomalies(meter_rows):
+                connection.execute("""INSERT INTO analytics_meter_anomaly
+                    (meter_consumption_key,history_period_count,baseline_median_kwh,baseline_mad_kwh,robust_z_score,anomaly_status,methodology,calculated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?)""", (row["meter_consumption_key"], row["history_period_count"],
+                        row["baseline_median_kwh"], row["baseline_mad_kwh"], row["robust_z_score"], row["anomaly_status"],
+                        "trailing_median_mad_v1", timestamp))
         count, value = connection.execute("SELECT COUNT(*), COALESCE(SUM(invoice_amount_local), 0) FROM fact_energy_ledger").fetchone()
         if count != len(facts) or Decimal(str(value)) != raw_value:
             raise DataQualityError(f"reconciliation failure: raw rows/value {len(facts)}/{raw_value}; fact rows/value {count}/{value}")
@@ -222,13 +312,16 @@ def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
 def write_report(base_dir, facts, raw_value, loaded_count, loaded_value, as_of_date):
     report = Path(base_dir) / "reports" / "data_quality_report.md"
     report.write_text(f"""# Data Quality Report\n\nGenerated: {datetime.now(timezone.utc).replace(microsecond=0).isoformat()}\n\n| Control | Result | Evidence |\n| --- | --- | --- |\n| Required columns | PASS | All three raw sources contain their documented required columns. |\n| Null threshold | PASS | 0 nulls in required fields; threshold is 0. |\n| Duplicate business keys | PASS | {len(facts)} unique `invoice_line_id` values and unique dimension business keys. |\n| Invalid ranges | PASS | Positive quantities, non-negative values, valid date intervals, and valid factor ranges. |\n| Referential integrity | PASS | Every invoice resolves to a site and exactly one effective emission factor. |\n| Freshness | PASS | Latest invoice date is within 45 days of {as_of_date.isoformat()}. |\n| Row reconciliation | PASS | Raw invoice rows: {len(facts)}; loaded fact rows: {loaded_count}. |\n| Value reconciliation | PASS | Raw parsed invoice value: {raw_value}; loaded fact value: {loaded_value}. |\n\n## Loaded model\n\n- Fact grain: one utility invoice line (`invoice_line_id`).\n- Fact rows: {loaded_count}.\n- Total invoice value (INR): {loaded_value:.2f}.\n- Total standardized energy (kWh): {sum(row['quantity_kwh_equivalent'] for row in facts):.2f}.\n""", encoding="utf-8")
+    # Keep the report wording aligned with the four governed raw sources while
+    # preserving its intentionally compact template above.
+    report.write_text(report.read_text(encoding="utf-8").replace("All three raw sources", "All four raw sources"), encoding="utf-8")
 
 
 def run(base_dir, as_of_date=None):
     as_of_date = as_of_date or date.today()
-    site_rows, factor_rows, facts, raw_value = clean(base_dir, as_of_date)
+    site_rows, factor_rows, facts, meter_rows, raw_value = clean(base_dir, as_of_date)
     _write_csv(Path(base_dir) / "data" / "staging" / "clean_energy_ledger.csv", facts)
     _write_csv(Path(base_dir) / "data" / "staging" / "dim_site.csv", site_rows)
-    db_path, count, value = load_star_model(base_dir, site_rows, factor_rows, facts, raw_value)
+    db_path, count, value = load_star_model(base_dir, site_rows, factor_rows, facts, meter_rows, raw_value)
     write_report(base_dir, facts, raw_value, count, value, as_of_date)
     return {"database": str(db_path), "fact_rows": count, "invoice_value": float(value)}
