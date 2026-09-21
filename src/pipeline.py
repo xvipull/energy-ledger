@@ -166,11 +166,15 @@ def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
     base_dir = Path(base_dir)
     db_path = base_dir / "data" / "energy_ledger.db"
     schema = (base_dir / "sql" / "star_model.sql").read_text(encoding="utf-8")
+    kpi_layer = (base_dir / "sql" / "kpi_layer.sql").read_text(encoding="utf-8")
+    reconciliation_layer = (base_dir / "sql" / "reconciliation.sql").read_text(encoding="utf-8")
     if db_path.exists():
         db_path.unlink()
     connection = sqlite3.connect(db_path)
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(schema)
+    connection.executescript(kpi_layer)
+    connection.executescript(reconciliation_layer)
     try:
         with connection:
             for row in site_rows:
@@ -189,6 +193,12 @@ def load_star_model(base_dir, site_rows, factor_rows, facts, raw_value):
                 ("dim_site", "site_id", "site_key"), ("dim_energy_type", "energy_type", "energy_type_key"),
                 ("dim_currency", "currency_code", "currency_key"), ("dim_emission_factor", "factor_id", "emission_factor_key"))}
             timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            connection.execute(
+                """INSERT INTO audit_source_invoice_control
+                   (source_file_name,source_row_count,source_invoice_amount_local,currency_code,loaded_at_utc)
+                   VALUES (?,?,?,?,?)""",
+                ("utility_invoices.csv", len(facts), float(raw_value), "INR", timestamp),
+            )
             for row in facts:
                 row["site_key"] = ids["dim_site"][row["site_id"]]
                 row["energy_type_key"] = ids["dim_energy_type"][row["energy_type"]]

@@ -37,6 +37,28 @@ class EnergyLedgerPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(DataQualityError, "freshness failure"):
             clean(ROOT, as_of_date=date(2027, 1, 1))
 
+    def test_kpi_views_reconcile_source_curated_and_reporting_layers(self):
+        result = run(ROOT, as_of_date=date(2026, 9, 16))
+        connection = sqlite3.connect(result["database"])
+        try:
+            reconciliation = connection.execute(
+                """SELECT reconciliation_status, source_row_count, curated_row_count,
+                          reporting_row_count, source_to_curated_value_difference,
+                          curated_to_reporting_value_difference
+                   FROM v_reconciliation_source_to_reporting"""
+            ).fetchone()
+            self.assertEqual(reconciliation, ("PASS", 6, 6, 6, 0.0, 0.0))
+            trend = connection.execute(
+                "SELECT energy_mom_pct, rolling_3_month_energy_kwh FROM v_monthly_portfolio_trends"
+            ).fetchone()
+            self.assertIsNone(trend[0])  # First available month has no valid comparison period.
+            self.assertAlmostEqual(trend[1], 230988.88904, places=4)
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM v_invoice_rate_exceptions").fetchone()[0], 6
+            )
+        finally:
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

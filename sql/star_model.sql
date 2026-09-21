@@ -58,3 +58,14 @@ CREATE TABLE fact_energy_ledger (
   source_file_name TEXT NOT NULL,
   load_timestamp_utc TEXT NOT NULL
 );
+
+-- One immutable control record per landed invoice extract.  This retains the
+-- source-level count and value needed to reconcile raw, curated, and reporting
+-- layers without copying raw invoice lines into the analytics model.
+CREATE TABLE audit_source_invoice_control (
+  source_file_name TEXT PRIMARY KEY,
+  source_row_count INTEGER NOT NULL CHECK (source_row_count >= 0),
+  source_invoice_amount_local REAL NOT NULL,
+  currency_code TEXT NOT NULL,
+  loaded_at_utc TEXT NOT NULL
+);
