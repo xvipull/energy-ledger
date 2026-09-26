@@ -1,6 +1,13 @@
-# Energy Consumption, Cost & Sustainability Reconciliation Platform
+# Energy Ledger
 
-Energy Ledger converts messy utility invoices, monthly meter consumption, site master data, and emissions factors into an auditable operating record. Finance can close energy cost, Facilities can investigate consumption, and Sustainability can trace activity to an approved factor.
+Energy Ledger is an auditable energy-data reconciliation platform for Finance, Facilities, and Sustainability teams. It converts inconsistent utility invoices, monthly meter consumption, site master data, and emissions factors into a governed operating record with traceable cost, consumption, and emissions metrics.
+
+## What it delivers
+
+- A validated raw-to-curated pipeline that preserves source business keys and blocks invalid loads.
+- A SQLite star schema with conformed site, date, energy type, currency, emissions-factor, and meter dimensions.
+- Governed KPI, reconciliation, bill-to-meter variance, invoice-rate exception, and robust meter-anomaly views.
+- Reproducible EDA figures, a management-ready Excel workbook, and Power BI import/DAX assets.
 
 ## Problem, stakeholders, and dataset
 
@@ -14,7 +21,7 @@ Utility data is split across invoices, meter portals, and reference workbooks wi
 
 The tracked data is a deliberately small **synthetic** India sample: six August 2026 invoice lines, three sites, two controlled factors, and 45 January–September meter intervals. It is safe to publish, includes real-world-format inconsistencies, and contains one deliberate meter anomaly. It is not operational or disclosure data.
 
-## Architecture and schema
+## Architecture and data model
 
 ```mermaid
 flowchart LR
@@ -30,7 +37,7 @@ flowchart LR
   G --> K[EDA and quality reports]
 ```
 
-Invoice grain is one utility invoice line. Meter grain is one meter, closed billing interval, and source reading. Integer surrogate keys join conformed site, date, energy-type, currency, factor, and meter dimensions while source business keys remain visible.
+Invoice grain is one utility invoice line. Meter grain is one meter, closed billing interval, and source reading. Integer surrogate keys join conformed site, date, energy-type, currency, factor, and meter dimensions while source business keys remain visible for auditability.
 
 ## KPIs, controls, and techniques
 
@@ -58,7 +65,9 @@ The implementation uses Python `csv`/`Decimal`, SQLite foreign keys, SQL CTEs an
 
 ![Distribution and completeness](reports/figures/invoice_distribution_and_missingness.png)
 
-## Reproduce from a fresh clone
+## Quick start
+
+Requirements: Python 3 and the packages in `requirements.txt`.
 
 ```sh
 git clone https://github.com/xvipull/energy-ledger.git
@@ -71,13 +80,26 @@ python3 -m unittest discover -s tests -v
 python3 src/run_eda.py
 ```
 
-This generates the ignored SQLite database, clean staging CSVs, quality report, and EDA report. Verify reconciliation:
+This generates the ignored SQLite database, clean staging CSVs, quality report, EDA report, and figures. The generated artifacts are reproducible from the tracked raw data and code. Verify reconciliation:
 
 ```sh
 sqlite3 data/energy_ledger.db "SELECT * FROM v_reconciliation_source_to_reporting;"
 ```
 
 Open [the Excel management pack](excel/energy_ledger_management_pack.xlsx) for management review. Use [the Power BI package](powerbi/README.md) to create the desktop report from governed SQLite extracts.
+
+## Repository guide
+
+| Path | Purpose |
+| --- | --- |
+| `data/raw/` | Synthetic invoices, meter readings, site master, and emissions factors |
+| `src/pipeline.py` | Validation, cleaning, dimensional loading, and reconciliation orchestration |
+| `sql/` | Star schema, KPI layer, reconciliation, and advanced-analytics SQL |
+| `tests/` | Pipeline, control, reconciliation, and anomaly regression tests |
+| `reports/` | Reproducible EDA summary and generated visual outputs |
+| `excel/` | Management-pack workbook |
+| `powerbi/` | SQLite import queries, DAX measures, and Power BI setup notes |
+| `docs/` | Data dictionary, implementation detail, assumptions, UAT, and demo materials |
 
 ## Insights, recommendations, and limitations
 
@@ -96,5 +118,5 @@ Next steps: production source onboarding and volume testing, Finance approval of
 
 ## Documentation
 
-- [Data pipeline](docs/data_pipeline.md), [SQL analytics](docs/sql_analytics.md), [advanced analytics](docs/advanced_analytics.md)
-- [UAT evidence](docs/uat.md), [demo script](docs/demo_script.md), [KPI catalog](docs/kpi_catalog.md), and [requirements](docs/requirements.md)
+- [Data pipeline](docs/data_pipeline.md), [SQL analytics](docs/sql_analytics.md), [advanced analytics](docs/advanced_analytics.md), and [data dictionary](docs/data_dictionary.md)
+- [UAT evidence](docs/uat.md), [demo script](docs/demo_script.md), [KPI catalog](docs/kpi_catalog.md), [assumptions](docs/assumptions.md), and [requirements](docs/requirements.md)
